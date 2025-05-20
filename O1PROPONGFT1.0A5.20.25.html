@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Pong – 60 FPS Optimized with Sound</title>
+  <style>
+    /* Basic reset & full‑screen canvas */
+    html,body{
+      height:100%;margin:0;padding:0;background:#111;display:flex;align-items:center;justify-content:center;
+    }
+    canvas{background:#222;display:block}
+  </style>
+</head>
+<body>
+<canvas id="pongCanvas" width="800" height="500"></canvas>
+<script>
+(() => {
+  /*--------------------------------------------------*
+   |  Canvas & Context                                |
+   *--------------------------------------------------*/
+  const canvas = document.getElementById('pongCanvas');
+  const ctx     = canvas.getContext('2d');
+  const WIDTH   = canvas.width;
+  const HEIGHT  = canvas.height;
+
+  /*--------------------------------------------------*
+   |  Audio (tiny synth beeps)                        |
+   *--------------------------------------------------*/
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const audioCtx = new AudioCtx();
+  // Some browsers suspend the context – wait for first user interaction
+  const resumeAudio = () => audioCtx.state === 'suspended' && audioCtx.resume();
+  window.addEventListener('pointerdown', resumeAudio, {once:true});
+
+  const playTone = (freq, dur = 0.08) => {
+    // Cheap but effective – create a short square‑wave envelope
+    const osc  = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + dur);
+  };
+  const beep = () => playTone(660);   // paddle hit
+  const boop = () => playTone(330);   // score
+
+  /*--------------------------------------------------*
+   |  Game constants                                  |
+   *--------------------------------------------------*/
+  const PADDLE_W = 10,
+        PADDLE_H = 80,
+        BALL_SIZE = 10,
+        GOAL_SCORE = 5,
+        FPS = 60,
+        DT  = 1 / FPS;
+
+  const BALL_SPEED_INIT = 340; // px / s
+  const AI_SPEED        = 300; // px / s
+
+  /*--------------------------------------------------*
+   |  Game state                                      |
+   *--------------------------------------------------*/
+  let leftY  = (HEIGHT - PADDLE_H) / 2;
+  let rightY = (HEIGHT - PADDLE_H) / 2;
+
+  let ballX, ballY, velX, velY;
+  let scoreL = 0, scoreR = 0;
+  let gameOver = false;
+
+  const clamp = (v, min, max) => v < min ? min : v > max ? max : v;
+
+  const resetBall = (toRight = true) => {
+    ballX = WIDTH / 2 - BALL_SIZE / 2;
+    ballY = HEIGHT / 2 - BALL_SIZE / 2;
+    const angle = (Math.random() * Math.PI / 4) - Math.PI / 8; // ±22.5°
+    velX = (toRight ? 1 : -1) * BALL_SPEED_INIT * Math.cos(angle);
+    velY = BALL_SPEED_INIT * Math.sin(angle);
+  };
+  resetBall(true);
+
+  /*--------------------------------------------------*
+   |  Input – mouse controls left paddle              |
+   *--------------------------------------------------*/
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    leftY = clamp(e.clientY - rect.top - PADDLE_H / 2, 0, HEIGHT - PADDLE_H);
+  });
+
+  /*--------------------------------------------------*
+   |  Fixed‑timestep main loop (60 Hz logic update)   |
+   *--------------------------------------------------*/
+  let last = performance.now(), acc = 0;
+  const loop = now => {
+    acc += (now - last) / 1000; // seconds
+    last  = now;
+    while (acc >= DT) { update(DT); acc -= DT; }
+    draw();
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+
+  /*--------------------------------------------------*
+   |  Update – physics & rules                        |
+   *--------------------------------------------------*/
+  function update(dt){
+    if(gameOver) return;
+
+    // Move ball
+    ballX += velX * dt;
+    ballY += velY * dt;
+
+    // Wall bounce
+    if(ballY <= 0 && velY < 0){ velY = -velY; ballY = 0; }
+    if(ballY + BALL_SIZE >= HEIGHT && velY > 0){ velY = -velY; ballY = HEIGHT - BALL_SIZE; }
+
+    // AI paddle tracks ball
+    const target = ballY + BALL_SIZE/2;
+    const centerR = rightY + PADDLE_H/2;
+    const dir = Math.sign(target - centerR);
+    rightY += dir * AI_SPEED * dt;
+    rightY = clamp(rightY, 0, HEIGHT - PADDLE_H);
+
+    // Paddle collisions
+    // Left
+    if(ballX <= PADDLE_W &&
+       ballY + BALL_SIZE >= leftY && ballY <= leftY + PADDLE_H && velX < 0){
+      paddleBounce(leftY);
+    }
+    // Right
+    if(ballX + BALL_SIZE >= WIDTH - PADDLE_W &&
+       ballY + BALL_SIZE >= rightY && ballY <= rightY + PADDLE_H && velX > 0){
+      paddleBounce(rightY);
+    }
+
+    // Scoring
+    if(ballX + BALL_SIZE < 0){ scoreR++; boop(); resetBall(true); checkWin(); }
+    if(ballX > WIDTH){         scoreL++; boop(); resetBall(false); checkWin(); }
+  }
+
+  const paddleBounce = paddleY => {
+    // Reflect X velocity, tweak angle based on hit position
+    const rel = (ballY + BALL_SIZE/2) - (paddleY + PADDLE_H/2);
+    const norm = rel / (PADDLE_H/2); // -1..1
+    const maxAngle = Math.PI/4; // 45°
+    const angle = norm * maxAngle;
+    const speed = Math.hypot(velX, velY) * 1.04; // small speed‑up
+    const dir   = Math.sign(velX) * -1; // reverse X
+    velX = dir * speed * Math.cos(angle);
+    velY = speed * Math.sin(angle);
+    beep();
+  };
+
+  function checkWin(){
+    if(scoreL >= GOAL_SCORE || scoreR >= GOAL_SCORE){
+      gameOver = true;
+      setTimeout(() => {
+        const playAgain = confirm(`${scoreL>=GOAL_SCORE? 'Left':'Right'} player wins! Play again?`);
+        if(playAgain){ scoreL = scoreR = 0; gameOver = false; resetBall(true); }
+      }, 200);
+    }
+  }
+
+  /*--------------------------------------------------*
+   |  Rendering                                       |
+   *--------------------------------------------------*/
+  function draw(){
+    ctx.clearRect(0,0,WIDTH,HEIGHT);
+
+    // Net
+    ctx.fillStyle = '#888';
+    for(let y=0; y<HEIGHT; y+=24){ ctx.fillRect(WIDTH/2-1,y,2,16);}    
+
+    // Paddles & ball
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, leftY, PADDLE_W, PADDLE_H);
+    ctx.fillRect(WIDTH-PADDLE_W, rightY, PADDLE_W, PADDLE_H);
+
+    ctx.fillStyle = '#ff0';
+    ctx.fillRect(ballX, ballY, BALL_SIZE, BALL_SIZE);
+
+    // Scores
+    ctx.fillStyle = '#fff';
+    ctx.font = '24px sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='top';
+    ctx.fillText(scoreL, WIDTH*0.25, 16);
+    ctx.fillText(scoreR, WIDTH*0.75, 16);
+
+    // Game over overlay
+    if(gameOver){
+      ctx.fillStyle='rgba(0,0,0,0.5)';
+      ctx.fillRect(0,0,WIDTH,HEIGHT);
+      ctx.fillStyle='#f33';
+      ctx.font='48px sans-serif';
+      ctx.fillText('GAME OVER', WIDTH/2, HEIGHT/2 - 24);
+    }
+  }
+})();
+</script>
+</body>
+</html>
